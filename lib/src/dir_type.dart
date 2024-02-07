@@ -42,9 +42,14 @@ extension DirTypeVale on DirType {
   /// It will provide the direct file path for [DirType] & [DirName] using [relativePath]
   /// Example: For [DirType.audio] && [DirName.podcasts], it will return "/storage/emulated/0/Podcasts/[relativePath]"
   /// For setting, [relativePath] = [FilePath.root], it will return "/storage/emulated/0/Podcasts"
-  String fullPath({required String relativePath, required DirName dirName}) {
+  String fullPath({
+    required String relativePath,
+    required DirName dirName,
+    String? externalVolume,
+  }) {
     checkDirTypeAndName(dirType: this, dirName: dirName);
     final segment = relativePath.trim();
+
     if (segment == FilePath.root) {
       return "/storage/emulated/0/${dirName.folder}";
     }
