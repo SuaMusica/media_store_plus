@@ -728,7 +728,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     appFolder,
                     dirType,
                     dirName,
-                    externalVolumeName!!,
+                    externalVolumeName,
                     id3v2Tags,
                 )
             } else {
