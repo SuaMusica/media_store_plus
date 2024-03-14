@@ -18,13 +18,13 @@ class MediaStore {
   static String appFolder = "";
   int _sdkInt = 0;
 
-  MediaStore(String? appFolder) {
+  MediaStore([String? appFolder]) {
     if (appFolder != null) {
       MediaStore.appFolder = appFolder;
     }
     _getSDKInt();
   }
-  
+
   void _getSDKInt() async {
     _sdkInt = await MediaStorePlatform.instance.getPlatformSDKInt();
   }
