@@ -16,8 +16,11 @@ import android.util.Log
 import androidx.annotation.NonNull
 import androidx.annotation.RequiresApi
 import androidx.documentfile.provider.DocumentFile
-import com.mpatric.mp3agic.ID3v24Tag
-import com.mpatric.mp3agic.Mp3File
+import androidx.work.Configuration
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import com.google.gson.Gson
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
@@ -43,23 +46,24 @@ fun String.capitalized(): String {
 /** MediaStorePlusPlugin */
 class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     PluginRegistry.ActivityResultListener {
-        private var activity: Activity? = null
-        private lateinit var channel: MethodChannel
-        private lateinit var result: Result
-        private lateinit var uriString: String
-        private lateinit var fileName: String
-        private lateinit var tempFilePath: String
-        private var dirType: Int = 0
-        private lateinit var dirName: String
-        private lateinit var appFolder: String
-        private var externalVolumeName: String? = null
-        private var id3v2Tags: Map<String, String>? = null
-        private val TAG = "MediaStorage"
+    private var activity: Activity? = null
+    private lateinit var channel: MethodChannel
+    private lateinit var result: Result
+    private lateinit var uriString: String
+    private lateinit var fileName: String
+    private lateinit var tempFilePath: String
+    private var dirType: Int = 0
+    private lateinit var dirName: String
+    private lateinit var appFolder: String
+    private var externalVolumeName: String? = null
+    private var id3v2Tags: Map<String, String>? = null
+    private val TAG = "MediaStorage"
 
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "media_store_plus")
         channel.setMethodCallHandler(this)
+
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -67,6 +71,12 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         Log.d(TAG, "call.method: ${call.method}")
         if (call.method == "getPlatformSDKInt") {
             result.success(Build.VERSION.SDK_INT)
+            val myConfig = Configuration.Builder()
+                .setMinimumLoggingLevel(Log.INFO)
+                .build()
+
+            WorkManager.initialize(this.activity!!.applicationContext, myConfig)
+
         } else if (call.method == "saveFile") {
             saveFile(
                 Uri.parse(call.argument("tempFilePath")!!).path!!,
@@ -77,7 +87,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 call.argument("externalVolumeName"),
                 call.argument("id3v2Tags"),
             )
-                } else if (call.method == "deleteFile") {
+        } else if (call.method == "deleteFile") {
             deleteFile(
                 call.argument("fileName")!!,
                 call.argument("appFolder")!!,
@@ -198,7 +208,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 externalVolumeName,
                 id3v2Tags
             )
-            File(path).delete()
+//            File(path).delete()
             result.success(true)
 
         } catch (e: Exception) {
@@ -265,38 +275,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
-    private fun saveId3(file: String, id3v2Tags: Map<String, String>?) {
 
-        if (id3v2Tags != null) {
-            try {
-                val mp3File = Mp3File(file)
-
-                val id3v24Tag = ID3v24Tag()
-                id3v24Tag.title = id3v2Tags["title"]
-                id3v24Tag.comment = id3v2Tags["comment"]
-                id3v24Tag.album = id3v2Tags["album"]
-                id3v24Tag.artist = id3v2Tags["artist"]
-                id3v24Tag.url = java.lang.String.format(
-                    "https://www.suamusica.com.br/perfil/%s?playlistId=%s&albumId=%s&musicId=%s",
-                    id3v2Tags["artistId"],
-                    id3v2Tags["playlistId"],
-                    id3v2Tags["albumId"],
-                    id3v2Tags["musicId"]
-                )
-                mp3File.id3v2Tag = id3v24Tag
-                val newFilename = "$file.tmp"
-                mp3File.save(newFilename)
-
-                val from = File(newFilename)
-                from.renameTo(File(file))
-
-                Log.i(TAG, "Successfully set ID3v2 tags")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to set ID3v2 tags", e)
-            }
-        }
-    }
 
 
     @RequiresApi(Build.VERSION_CODES.Q)
@@ -310,6 +289,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun createOrUpdateFile(
         path: String,
         name: String,
@@ -319,39 +299,27 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         externalVolumeName: String?,
         id3v2Tags: Map<String, String>?
     ) {
-        saveId3(path, id3v2Tags)
-        // { photo, music, video, download }
-        Log.d(TAG, "DirName $dirName")
+        val gson = Gson()
+        val id3v2TagsJson = gson.toJson(id3v2Tags)
 
-        val relativePath: String = if (appFolder.trim().isEmpty()) {
-            dirName
-        } else {
-            dirName + File.separator + appFolder
-        }
+        val workData = workDataOf(
+            "path" to path,
+            "name" to name,
+            "appFolder" to appFolder,
+            "dirType" to dirType,
+            "dirName" to dirName,
+            "externalVolumeName" to externalVolumeName,
+        "id3v2Tags" to id3v2TagsJson
+        )
 
-        deleteFileUsingDisplayName(name, appFolder, dirType, dirName, externalVolumeName)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(MediaStore.Audio.Media.DISPLAY_NAME, name)
-                put(MediaStore.Audio.Media.RELATIVE_PATH, relativePath)
-                put(MediaStore.Audio.Media.IS_PENDING, 1)
-            }
+        val fileOperationRequest = OneTimeWorkRequestBuilder<FileOperationWorker>()
+            .setInputData(workData)
+            .build()
 
 
-            val resolver = activity!!.applicationContext.contentResolver
-            val uri = resolver.insert(getUriFromDirType(dirType, externalVolumeName), values)!!
 
-            resolver.openOutputStream(uri).use { os ->
-                File(path).inputStream().use { it.copyTo(os!!) }
-            }
+        WorkManager.getInstance(activity!!.applicationContext).enqueue(fileOperationRequest)
 
-            values.clear()
-            values.put(MediaStore.Audio.Media.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
-
-            Log.d(TAG, "saveFile $name")
-
-        }
     }
 
 
