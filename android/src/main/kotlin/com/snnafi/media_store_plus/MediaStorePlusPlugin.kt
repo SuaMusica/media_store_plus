@@ -28,6 +28,7 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry
 import java.io.File
+import java.nio.file.Files
 import java.io.FileOutputStream
 import java.util.*
 
@@ -284,6 +285,15 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     id3v2Tags["albumId"],
                     id3v2Tags["musicId"]
                 )
+                val artworkPath = id3v2Tags["artwork"]
+                val artworkFile = File(artworkPath)
+
+                Log.i(TAG, "[Downloader] MS cover: pl 9 | artworkFile: $artworkFile, exists: ${artworkFile.exists()}")
+
+                if (artworkFile.exists()) {
+                    id3v24Tag.setAlbumImage(artworkFile.readBytes(), "image/jpeg")
+                }
+
                 mp3File.id3v2Tag = id3v24Tag
                 val newFilename = "$file.tmp"
                 mp3File.save(newFilename)
@@ -291,8 +301,28 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 val from = File(newFilename)
                 from.renameTo(File(file))
 
+                // let format = java.lang.String.format(
+                //     "https://www.suamusica.com.br/perfil/%s?playlistId=%s&albumId=%s&musicId=%s",
+                //     id3v2Tags["artistId"],
+                //     id3v2Tags["playlistId"],
+                //     id3v2Tags["albumId"],
+                //     id3v2Tags["musicId"]
+                // )
+
+                Log.i(TAG, "[Downloader] MS | cover: ${id3v2Tags["cover"]}, url: ${id3v2Tags["url"]}, id3v24Tag.url: ${id3v24Tag.url}")
+                Log.i(TAG, "[Downloader] MS | artistId: ${id3v2Tags["artistId"]}, playlistId: ${id3v2Tags["playlistId"]}, albumId: ${id3v2Tags["albumId"]}, musicId: ${id3v2Tags["musicId"]},")
+                Log.i(TAG, "[Downloader] MS | id3v24Tag: ${id3v24Tag}")
+                Log.i(TAG, "[Downloader] MS | id3v2Tags: ${id3v2Tags}, artwork: ${id3v2Tags["artwork"]}")
+                Log.i(TAG, "[Downloader] MS | file: $file")
+                Log.i(TAG, "[Downloader] MS | mp3File: $mp3File")
+                Log.i(TAG, "[Downloader] MS | newFilename: $newFilename")
+                Log.i(TAG, "[Downloader] MS | from: $from")
+
                 Log.i(TAG, "Successfully set ID3v2 tags")
+j
+                // mp3File.dispose()
             } catch (e: Exception) {
+                Log.i(TAG, "[Downloader] cover: pl 17 | error: $e")
                 Log.e(TAG, "Failed to set ID3v2 tags", e)
             }
         }

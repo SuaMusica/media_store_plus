@@ -84,6 +84,8 @@ class MediaStore {
       );
     } else {
       Directory directory;
+
+      /// todo: check cover here
       if (sdCardPath != null && externalVolumeName != null) {
         directory = Directory("$sdCardPath/${dirName.folder}/$relativePath");
       } else {
