@@ -294,9 +294,6 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 )
 
                 val artworkFile = File(id3v2Tags["artwork"])
-
-                Log.i(TAG, "[Downloader] MS cover: pl 9 | artworkFile: $artworkFile, exists: ${artworkFile.exists()} | shouldAddCover: $shouldAddCover")
-
                 if (shouldAddCover && artworkFile.exists()) {
                     id3v24Tag.setAlbumImage(artworkFile.readBytes(), "image/jpeg")
                 }
