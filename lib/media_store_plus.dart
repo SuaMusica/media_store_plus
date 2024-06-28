@@ -67,6 +67,7 @@ class MediaStore {
     String? externalVolumeName,
     Map<String, String>? id3v2Tags,
     String? sdCardPath,
+    bool shouldAddCover = false,
   }) async {
     if (appFolder.isEmpty) {
       throw const AppFolderNotSetException(
@@ -87,6 +88,7 @@ class MediaStore {
         relativePath: relativePath.orAppFolder,
         externalVolumeName: externalVolumeName,
         id3v2Tags: id3v2Tags,
+        shouldAddCover: shouldAddCover,
       );
     } else {
       Directory directory;

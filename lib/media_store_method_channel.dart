@@ -25,6 +25,7 @@ class MethodChannelMediaStore extends MediaStorePlatform {
     required String relativePath,
     String? externalVolumeName,
     Map<String, String>? id3v2Tags,
+    bool shouldAddCover = false,
   }) async {
     final status = await methodChannel.invokeMethod<bool>('saveFile', {
       "tempFilePath": tempFilePath,
@@ -34,6 +35,7 @@ class MethodChannelMediaStore extends MediaStorePlatform {
       "appFolder": relativePath,
       "externalVolumeName": externalVolumeName,
       "id3v2Tags": id3v2Tags,
+      "shouldAddCover": shouldAddCover,
     });
     return status ?? false;
   }
