@@ -76,8 +76,6 @@ class MediaStore {
 
     checkDirTypeAndName(dirType: dirType, dirName: dirName);
     //Android 11 or higher, we use MediaStore API
-    debugPrint("[Downloader] MS | : $_sdkInt");
-
     if (_sdkInt > android10) {
       String fileName = Uri.parse(tempFilePath).pathSegments.last.trim();
       return await MediaStorePlatform.instance.saveFile(
@@ -92,13 +90,6 @@ class MediaStore {
       );
     } else {
       Directory directory;
-      final cover = id3v2Tags?["cover"];
-
-      /// TODO: check cover here
-      debugPrint(
-          "[Downloader] MS | : $sdCardPath - $externalVolumeName | ${dirName.folder} - $relativePath");
-      debugPrint("[Downloader] MS | : $cover - $id3v2Tags");
-
       if (sdCardPath != null && externalVolumeName != null) {
         directory = Directory("$sdCardPath/${dirName.folder}/$relativePath");
       } else {
@@ -114,25 +105,8 @@ class MediaStore {
       await Directory(directory.path).create(recursive: true);
 
       String fileName = Uri.parse(tempFilePath).pathSegments.last.trim();
-
       File tempFile = File(tempFilePath);
-
-      debugPrint(
-          "[Downloader] MS | : fileName: $fileName, path: ${directory.path}, tempFile: ${tempFile.path}");
-
       File file = await tempFile.copy("${directory.path}/$fileName");
-
-      debugPrint("[Downloader] MS | : file: ${file.path}, $file");
-
-      final result = await file.exists();
-
-      debugPrint("[Downloader] MS | : result: $result");
-
-      // if (result && id3v2Tags != null) {
-      //   final tags = id3v2Tags.entries.map((e) => "${e.key}=${e.value}").join(",");
-      //   await Process.run("id3v2", ["-2", tags, file.path]);
-      // }
-
       return await file.exists();
     }
   }

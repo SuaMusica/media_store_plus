@@ -310,7 +310,6 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
                 Log.i(TAG, "Successfully set ID3v2 tags")
             } catch (e: Exception) {
-                Log.i(TAG, "[Downloader] cover: pl 17 | error: $e")
                 Log.e(TAG, "Failed to set ID3v2 tags", e)
             }
         }
