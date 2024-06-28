@@ -319,7 +319,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 Log.i(TAG, "[Downloader] MS | from: $from")
 
                 Log.i(TAG, "Successfully set ID3v2 tags")
-j
+
                 // mp3File.dispose()
             } catch (e: Exception) {
                 Log.i(TAG, "[Downloader] cover: pl 17 | error: $e")
