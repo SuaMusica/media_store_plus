@@ -54,6 +54,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private lateinit var appFolder: String
         private var externalVolumeName: String? = null
         private var id3v2Tags: Map<String, String>? = null
+        private var shouldAddCover: Boolean = false
         private val TAG = "MediaStorage"
 
 
@@ -76,6 +77,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 call.argument("dirName")!!,
                 call.argument("externalVolumeName"),
                 call.argument("id3v2Tags"),
+                call.argument("shouldAddCover")!!,
             )
                 } else if (call.method == "deleteFile") {
             deleteFile(
@@ -181,6 +183,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         dirName: String,
         externalVolumeName: String?,
         id3v2Tags: Map<String, String>?,
+        shouldAddCover: Boolean = false,
     ) {
         this.fileName = name
         this.tempFilePath = path
@@ -196,7 +199,8 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 dirType,
                 dirName,
                 externalVolumeName,
-                id3v2Tags
+                id3v2Tags,
+                shouldAddCover,
             )
             File(path).delete()
             result.success(true)
@@ -266,8 +270,11 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
-    private fun saveId3(file: String, id3v2Tags: Map<String, String>?) {
-
+    private fun saveId3(
+        file: String,
+        id3v2Tags: Map<String, String>?,
+        shouldAddCover: Boolean = false,
+    ) {
         if (id3v2Tags != null) {
             try {
                 val mp3File = Mp3File(file)
@@ -284,6 +291,12 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     id3v2Tags["albumId"],
                     id3v2Tags["musicId"]
                 )
+
+                val artworkFile = File(id3v2Tags["artwork"])
+                if (shouldAddCover && artworkFile.exists()) {
+                    id3v24Tag.setAlbumImage(artworkFile.readBytes(), "image/jpeg")
+                }
+
                 mp3File.id3v2Tag = id3v24Tag
                 val newFilename = "$file.tmp"
                 mp3File.save(newFilename)
@@ -317,9 +330,14 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         dirType: Int,
         dirName: String,
         externalVolumeName: String?,
-        id3v2Tags: Map<String, String>?
+        id3v2Tags: Map<String, String>?,
+        shouldAddCover: Boolean = false
     ) {
-        saveId3(path, id3v2Tags)
+        saveId3(
+            path,
+            id3v2Tags,
+            shouldAddCover,
+        )
         // { photo, music, video, download }
         Log.d(TAG, "DirName $dirName")
 
@@ -730,6 +748,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     dirName,
                     externalVolumeName,
                     id3v2Tags,
+                    shouldAddCover,
                 )
             } else {
                 result.success(false)

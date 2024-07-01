@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/widgets.dart';
 import 'package:media_store_plus/src/dir_type.dart';
 import 'package:media_store_plus/src/document_tree.dart';
 import 'package:media_store_plus/src/exceptions.dart';
@@ -17,6 +18,9 @@ class MediaStore {
   /// Set app directory like Music/[MediaStore.appFolder], Download/[MediaStore.appFolder], DCIM/[MediaStore.appFolder]
   static String appFolder = "";
   int _sdkInt = 0;
+
+  /// API levels
+  static const android10 = 29;
 
   MediaStore([String? appFolder]) {
     if (appFolder != null) {
@@ -63,6 +67,7 @@ class MediaStore {
     String? externalVolumeName,
     Map<String, String>? id3v2Tags,
     String? sdCardPath,
+    bool shouldAddCover = false,
   }) async {
     if (appFolder.isEmpty) {
       throw const AppFolderNotSetException(
@@ -71,7 +76,7 @@ class MediaStore {
 
     checkDirTypeAndName(dirType: dirType, dirName: dirName);
     //Android 11 or higher, we use MediaStore API
-    if (_sdkInt > 29) {
+    if (_sdkInt > android10) {
       String fileName = Uri.parse(tempFilePath).pathSegments.last.trim();
       return await MediaStorePlatform.instance.saveFile(
         tempFilePath: tempFilePath,
@@ -81,6 +86,7 @@ class MediaStore {
         relativePath: relativePath.orAppFolder,
         externalVolumeName: externalVolumeName,
         id3v2Tags: id3v2Tags,
+        shouldAddCover: shouldAddCover,
       );
     } else {
       Directory directory;
