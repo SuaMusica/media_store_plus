@@ -5,6 +5,7 @@ import android.app.RecoverableSecurityException
 import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Intent
+import android.content.Context
 import android.database.Cursor
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -18,6 +19,7 @@ import androidx.annotation.RequiresApi
 import androidx.documentfile.provider.DocumentFile
 import com.mpatric.mp3agic.ID3v24Tag
 import com.mpatric.mp3agic.Mp3File
+import com.mpatric.mp3agic.InvalidDataException
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
@@ -30,7 +32,7 @@ import io.flutter.plugin.common.PluginRegistry
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
-
+import java.net.URL
 
 fun String.capitalized(): String {
     return this.replaceFirstChar {
@@ -56,10 +58,11 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private var id3v2Tags: Map<String, String>? = null
         private var shouldAddCover: Boolean = false
         private val TAG = "MediaStorage"
-
+        private var context: Context? = null
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "media_store_plus")
+        context = flutterPluginBinding.applicationContext
         channel.setMethodCallHandler(this)
     }
 
@@ -159,6 +162,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+        context = null
         channel.setMethodCallHandler(null)
     }
 
@@ -216,6 +220,53 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                             intentSender, 990, null, 0, 0, 0, null
                         )
                     }
+                }
+            }
+            if (e is InvalidDataException) {
+                Log.i(TAG, "InvalidDataException peguei")
+                try {
+                    val mp3File = Mp3File(path)
+                    val id3v24Tag = ID3v24Tag()
+                    id3v24Tag.title = id3v2Tags!!["title"]
+                    id3v24Tag.comment = id3v2Tags["comment"]
+                    id3v24Tag.album = id3v2Tags["album"]
+                    id3v24Tag.artist = id3v2Tags["artist"]
+                    id3v24Tag.url = java.lang.String.format(
+                        "https://www.suamusica.com.br/perfil/%s?playlistId=%s&albumId=%s&musicId=%s",
+                        id3v2Tags["artistId"],
+                        id3v2Tags["playlistId"],
+                        id3v2Tags["albumId"],
+                        id3v2Tags["musicId"]
+                    )
+
+                    val artworkFile = File(id3v2Tags["artwork"])
+                    if (shouldAddCover && artworkFile.exists()) {
+                        id3v24Tag.setAlbumImage(artworkFile.readBytes(), "image/jpeg")
+                    }
+
+                    mp3File.id3v2Tag = id3v24Tag
+                    val newFilename = "$path.tmp"
+                    mp3File.save(newFilename)
+
+                    val from = File(newFilename)
+                    from.renameTo(File(path))
+
+                    Log.i(TAG, "Successfully set ID3v2 tags")
+                    createOrUpdateFile(
+                        path,
+                        name,
+                        appFolder,
+                        dirType,
+                        dirName,
+                        externalVolumeName,
+                        id3v2Tags,
+                        shouldAddCover,
+                    )
+                    File(path).delete()
+                    result.success(true)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to set ID3v2 tags", e)
+                    result.success(false)
                 }
             }
             Log.e("Exception", e.message, e)
@@ -305,12 +356,105 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 from.renameTo(File(file))
 
                 Log.i(TAG, "Successfully set ID3v2 tags")
+            // } on catch (e: InvalidDataException) {
+            } catch (e: InvalidDataException) {
+                Log.i(TAG, "InvalidDataException peguei saveId3")
+                Log.i(TAG, "InvalidDataException caught, attempting to download and fix the file: $file", e)
+                val downloadedFile = downloadFileWithoutExtension(file)
+                if (downloadedFile != null) {
+                    val renamedFile = renameFileWithMp3Extension(downloadedFile)
+                    processMp3File(renamedFile, id3v2Tags, shouldAddCover)
+                } else {
+                    Log.e(TAG, "Failed to download the file: $file")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to set ID3v2 tags", e)
             }
         }
     }
 
+
+
+private fun processMp3File(
+  file: String,
+  id3v2Tags: Map<String, String>,
+  shouldAddCover: Boolean
+) {
+  val mp3File = Mp3File(file)
+  val id3v24Tag = ID3v24Tag()
+  id3v24Tag.title = id3v2Tags["title"]
+  id3v24Tag.comment = id3v2Tags["comment"]
+  id3v24Tag.album = id3v2Tags["album"]
+  id3v24Tag.artist = id3v2Tags["artist"]
+  id3v24Tag.url = java.lang.String.format(
+      "https://www.suamusica.com.br/perfil/%s?playlistId=%s&albumId=%s&musicId=%s",
+      id3v2Tags["artistId"],
+      id3v2Tags["playlistId"],
+      id3v2Tags["albumId"],
+      id3v2Tags["musicId"]
+  )
+
+  val artworkFile = File(id3v2Tags["artwork"])
+  if (shouldAddCover && artworkFile.exists()) {
+      id3v24Tag.setAlbumImage(artworkFile.readBytes(), "image/jpeg")
+  }
+
+  mp3File.id3v2Tag = id3v24Tag
+  val newFilename = "$file.tmp"
+  mp3File.save(newFilename)
+
+  val from = File(newFilename)
+  from.renameTo(File(file))
+
+  Log.i(TAG, "Successfully set ID3v2 tags")
+}
+
+// private fun downloadFileWithoutExtension(url: String): String? {
+//   val context = context ?: return null // Return null if context is not available
+//   return try {
+//     Log.i(TAG, "Downloading file: $url")
+//      val newUrlWithoutExtension = url.substringBeforeLast(".")
+//       val input = URL(newUrlWithoutExtension).openStream()
+//       val downloadedFile = File(context.cacheDir, "downloadedFile")
+//       downloadedFile.outputStream().use { output ->
+//           input.copyTo(output)
+//       }
+//       Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
+//       downloadedFile.absolutePath
+//   } catch (e: Exception) {
+//       Log.e(TAG, "Failed to download the file: $url", e)
+//       null
+//   }
+// }
+private fun downloadFileWithoutExtension(url: String): String? {
+  val context = context ?: return null // Return null if context is not available
+
+  return try {
+      Log.i(TAG, "Downloading file: $url")
+      val hardcodedContent = "https://android.suamusica.com.br/54307089/4416215/01+-+01+-+MARESIA+-+JULLIA_57795714"
+      val input = URL(hardcodedContent).openStream()
+      Log.i(TAG, "Downloaded file: $input")
+      val downloadedFile = File(context.cacheDir, "downloadedFile")
+      Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
+      downloadedFile.outputStream().use { output ->
+          input.copyTo(output)
+      }
+      
+      Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
+      downloadedFile.absolutePath
+  } catch (e: Exception) {
+      Log.e(TAG, "Failed to download the file: $url", e)
+      null
+  }
+}
+
+private fun renameFileWithMp3Extension(filePath: String): String {
+  val file = File(filePath)
+  val renamedFile = File(file.parent, "${file.name}.mp3")
+  file.renameTo(renamedFile)
+  Log.i(TAG, "Renamed file to: ${renamedFile.absolutePath}")
+  return renamedFile.absolutePath
+}
 
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun getUriFromDirType(dirType: Int, externalVolumeName: String?): Uri {
