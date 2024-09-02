@@ -32,7 +32,18 @@ import io.flutter.plugin.common.PluginRegistry
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
+// import java.net.URLMediaStorePlusPlugin
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import java.net.HttpURLConnection
+import java.io.InputStream
+import java.io.OutputStream
+import java.io.BufferedInputStream
 import java.net.URL
+import kotlinx.coroutines.Job
 
 fun String.capitalized(): String {
     return this.replaceFirstChar {
@@ -59,6 +70,8 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private var shouldAddCover: Boolean = false
         private val TAG = "MediaStorage"
         private var context: Context? = null
+        private val job = Job()
+        private val coroutineScope = CoroutineScope(Dispatchers.IO + job)
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "media_store_plus")
@@ -358,22 +371,30 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 Log.i(TAG, "Successfully set ID3v2 tags")
             // } on catch (e: InvalidDataException) {
             } catch (e: InvalidDataException) {
-                Log.i(TAG, "InvalidDataException peguei saveId3")
+                // Log.i(TAG, "InvalidDataException peguei saveId3")
                 Log.i(TAG, "InvalidDataException caught, attempting to download and fix the file: $file", e)
-                val downloadedFile = downloadFileWithoutExtension(file)
-                if (downloadedFile != null) {
-                    val renamedFile = renameFileWithMp3Extension(downloadedFile)
-                    processMp3File(renamedFile, id3v2Tags, shouldAddCover)
-                } else {
-                    Log.e(TAG, "Failed to download the file: $file")
+                // val downloadedFile = downloadFileWithoutExtension(file)
+                val mockedFile = "https://android.suamusica.com.br/54307089/4416215/01+-+01+-+MARESIA+-+JULLIA_57795714"
+                // val downloadedFile = downloadFileWithoutExtension(context!!, file)
+                // val downloadedFile = downloadFileWithoutExtension(context!!, mockedFile)
+
+                // lifecycleScope.launch {
+                coroutineScope.launch {
+                    val downloadedFile = downloadFileWithoutExtension(context!!, mockedFile)
+                    // val downloadedFile = downloadFileWithoutExtension(context!!, file)
+                    // val downloadedFile = downloadFileWithoutExtension(context!!, mockedFile)
+                    if (downloadedFile != null) {
+                        val renamedFile = renameFileWithMp3Extension(downloadedFile)
+                        processMp3File(renamedFile, id3v2Tags, shouldAddCover)
+                    } else {
+                        Log.e(TAG, "Failed to download the file: $file")
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to set ID3v2 tags", e)
             }
         }
     }
-
-
 
 private fun processMp3File(
   file: String,
@@ -409,6 +430,39 @@ private fun processMp3File(
   Log.i(TAG, "Successfully set ID3v2 tags")
 }
 
+suspend fun downloadFileWithoutExtension(context: Context, urlString: String): String? {
+  return withContext(Dispatchers.IO) {
+      try {
+          Log.i(TAG, "Downloading file: $urlString")
+
+          // Open connection to the URL
+          val url = URL(urlString)
+          val connection = url.openConnection() as HttpURLConnection
+          connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+          connection.connect()
+
+          // Create a file in the cache directory
+          val downloadedFile = File(context.cacheDir, "downloadedFile")
+
+          // Open input and output streams
+          val inputStream = connection.inputStream
+          downloadedFile.outputStream().use { outputStream ->
+              inputStream.copyTo(outputStream)
+          }
+
+          // Close streams
+          inputStream.close()
+          connection.disconnect()
+
+          Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
+          downloadedFile.absolutePath
+      } catch (e: Exception) {
+          Log.e(TAG, "Failed to download the file: $urlString", e)
+          null
+      }
+  }
+}
+
 // private fun downloadFileWithoutExtension(url: String): String? {
 //   val context = context ?: return null // Return null if context is not available
 //   return try {
@@ -426,27 +480,72 @@ private fun processMp3File(
 //       null
 //   }
 // }
-private fun downloadFileWithoutExtension(url: String): String? {
-  val context = context ?: return null // Return null if context is not available
+// suspend fun downloadFileWithoutExtension(url: String): String? {
+//   val context = context ?: return null // Return null if context is not available
 
-  return try {
-      Log.i(TAG, "Downloading file: $url")
-      val hardcodedContent = "https://android.suamusica.com.br/54307089/4416215/01+-+01+-+MARESIA+-+JULLIA_57795714"
-      val input = URL(hardcodedContent).openStream()
-      Log.i(TAG, "Downloaded file: $input")
-      val downloadedFile = File(context.cacheDir, "downloadedFile")
-      Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
-      downloadedFile.outputStream().use { output ->
-          input.copyTo(output)
-      }
+//   return withContext(Dispatchers.IO) {
+//       try {
+//           Log.i(TAG, "Downloading file: $url")
+//           // val hardcodedContent = "https://android.suamusica.com.br/54307089/4416215/01+-+01+-+MARESIA+-+JULLIA_57795714"
+//           // // val input = URL(url).openStream()
+//           // val input = URL(hardcodedContent).openStream()
+//           // val downloadedFile = File(context.cacheDir, "downloadedFile")
+//           // downloadedFile.outputStream().use { output ->
+//           //     input.copyTo(output)
+//           // }
+//           // Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
+//           // downloadedFile.absolutePath
+//           // Open connection to URL
+//           val hardcodedContent = "https://android.suamusica.com.br/54307089/4416215/01+-+01+-+MARESIA+-+JULLIA_57795714"
+//           // val connection = URL(url).openConnection() as HttpURLConnection
+//           Log.i(TAG, "Downloading file: $hardcoded")
+//           val connection = URL(hardcodedContent).openConnection() as HttpURLConnection
+//           val urlConnection = URL(hardcodedContent).openConnection() as HttpURLConnection
+//           urlConnection.setRequestProperty("User-Agent", "Mozilla/5.0")
+//             val input = urlConnection.inputStream
+
+//             val downloadedFile = File(context.cacheDir, "downloadedFile")
+//             downloadedFile.outputStream().use { output ->
+//                 input.copyTo(output)
+//             }
+//             Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
+//             downloadedFile.absolutePath
+//       } catch (e: Exception) {
+//           Log.e(TAG, "Failed to download the file: $url", e)
+//           null
+//       }
+//   }
+// }
+// fun downloadFileWithoutExtension(context: Context, urlString: String): String? {
+//   return try {
+//       Log.i(TAG, "Downloading file: $urlString")
+
+//       // Open connection to the URL
+//       val url = URL(urlString)
+//       val connection = url.openConnection() as HttpURLConnection
+//       connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+//       connection.connect()
+
+//       // Create a file in the cache directory
+//       val downloadedFile = File(context.cacheDir, "downloadedFile")
       
-      Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
-      downloadedFile.absolutePath
-  } catch (e: Exception) {
-      Log.e(TAG, "Failed to download the file: $url", e)
-      null
-  }
-}
+//       // Open input and output streams
+//       val inputStream = connection.inputStream
+//       downloadedFile.outputStream().use { outputStream ->
+//           inputStream.copyTo(outputStream)
+//       }
+
+//       // Close streams
+//       inputStream.close()
+//       connection.disconnect()
+
+//       Log.i(TAG, "Downloaded file: ${downloadedFile.absolutePath}")
+//       downloadedFile.absolutePath
+//   } catch (e: Exception) {
+//       Log.e(TAG, "Failed to download the file: $urlString", e)
+//       null
+//   }
+// }
 
 private fun renameFileWithMp3Extension(filePath: String): String {
   val file = File(filePath)
