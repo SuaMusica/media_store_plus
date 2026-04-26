@@ -18,7 +18,6 @@ import androidx.annotation.RequiresApi
 import androidx.documentfile.provider.DocumentFile
 import com.mpatric.mp3agic.ID3v24Tag
 import com.mpatric.mp3agic.Mp3File
-import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -44,8 +43,10 @@ fun String.capitalized(): String {
 class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     PluginRegistry.ActivityResultListener {
         private var activity: Activity? = null
+        private var activityBinding: ActivityPluginBinding? = null
         private lateinit var channel: MethodChannel
-        private lateinit var result: Result
+        private lateinit var result: OneShotResult
+        private val pendingResults = mutableMapOf<Int, OneShotResult>()
         private lateinit var uriString: String
         private lateinit var fileName: String
         private lateinit var tempFilePath: String
@@ -62,6 +63,59 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private val id3RewriteHeapOverheadBytes = 16L * 1024L * 1024L
         private val maxDocumentTreeChildren = 500
 
+        private inner class OneShotResult(private val delegate: Result) : Result {
+            private var completed = false
+
+            @Synchronized
+            override fun success(result: Any?) {
+                if (completed) return
+                completed = true
+                try {
+                    delegate.success(result)
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "Ignoring duplicate MediaStorePlus result", e)
+                }
+            }
+
+            @Synchronized
+            override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                if (completed) return
+                completed = true
+                try {
+                    delegate.error(errorCode, errorMessage, errorDetails)
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "Ignoring duplicate MediaStorePlus error result", e)
+                }
+            }
+
+            @Synchronized
+            override fun notImplemented() {
+                if (completed) return
+                completed = true
+                try {
+                    delegate.notImplemented()
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "Ignoring duplicate MediaStorePlus notImplemented result", e)
+                }
+            }
+        }
+
+        private fun savePendingResult(requestCode: Int) {
+            pendingResults.remove(requestCode)?.success(false)
+            pendingResults[requestCode] = result
+        }
+
+        private fun restorePendingResult(requestCode: Int): Boolean {
+            val pendingResult = pendingResults.remove(requestCode) ?: return false
+            result = pendingResult
+            return true
+        }
+
+        private fun finishPendingResults(value: Any?) {
+            pendingResults.values.forEach { it.success(value) }
+            pendingResults.clear()
+        }
+
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "media_store_plus")
@@ -69,7 +123,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
-        this.result = result
+        this.result = OneShotResult(result)
         Log.d(TAG, "call.method: ${call.method}")
         if (call.method == "getPlatformSDKInt") {
             result.success(Build.VERSION.SDK_INT)
@@ -159,25 +213,32 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activityBinding?.removeActivityResultListener(this)
+        activityBinding = binding
         this.activity = binding.activity
         binding.addActivityResultListener(this)
     }
 
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
+        finishPendingResults(false)
         channel.setMethodCallHandler(null)
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
+        activityBinding?.removeActivityResultListener(this)
+        activityBinding = null
         activity = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        this.activity = binding.activity as FlutterActivity
-        binding.addActivityResultListener(this)
+        onAttachedToActivity(binding)
     }
 
     override fun onDetachedFromActivity() {
+        activityBinding?.removeActivityResultListener(this)
+        activityBinding = null
         activity = null
+        finishPendingResults(false)
     }
 
     private fun saveFile(
@@ -217,6 +278,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     val intentSender =
                         recoverableSecurityException.userAction.actionIntent.intentSender
                     intentSender.let {
+                        savePendingResult(990)
                         activity!!.startIntentSenderForResult(
                             intentSender, 990, null, 0, 0, 0, null
                         )
@@ -254,6 +316,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     val intentSender =
                         recoverableSecurityException.userAction.actionIntent.intentSender
                     intentSender.let {
+                        savePendingResult(991)
                         activity!!.startIntentSenderForResult(
                             intentSender, 991, null, 0, 0, 0, null
                         )
@@ -542,6 +605,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     private fun uriFromFilePath(path: String): String? {
+        val reply = result
         try {
             MediaScannerConnection.scanFile(
                 activity!!.applicationContext,
@@ -549,10 +613,11 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 null
             ) { _, uri ->
                 Log.d("uriFromFilePath", uri?.toString().toString())
-                result.success(uri?.toString()?.trim())
+                reply.success(uri?.toString()?.trim())
             }
 
         } catch (_: Exception) {
+            reply.success(null)
         }
         return null
     }
@@ -588,6 +653,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
         }
 
+        savePendingResult(992)
         activity!!.startActivityForResult(intent, 992)
     }
 
@@ -611,6 +677,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     val intentSender =
                         recoverableSecurityException.userAction.actionIntent.intentSender
                     intentSender.let {
+                        savePendingResult(993)
                         activity!!.startIntentSenderForResult(
                             intentSender, 993, null, 0, 0, 0, null
                         )
@@ -633,6 +700,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     val intentSender =
                         recoverableSecurityException.userAction.actionIntent.intentSender
                     intentSender.let {
+                        savePendingResult(994)
                         activity!!.startIntentSenderForResult(
                             intentSender, 994, null, 0, 0, 0, null
                         )
@@ -738,6 +806,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     val intentSender =
                         recoverableSecurityException.userAction.actionIntent.intentSender
                     intentSender.let {
+                        savePendingResult(995)
                         activity!!.startIntentSenderForResult(
                             intentSender, 995, null, 0, 0, 0, null
                         )
@@ -784,6 +853,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     val intentSender =
                         recoverableSecurityException.userAction.actionIntent.intentSender
                     intentSender.let {
+                        savePendingResult(996)
                         activity!!.startIntentSenderForResult(
                             intentSender, 996, null, 0, 0, 0, null
                         )
@@ -836,6 +906,14 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         Log.d(TAG, "onActivityResult: $resultCode, $resultCode")
+        if (requestCode !in 990..996) {
+            return false
+        }
+        if (!restorePendingResult(requestCode)) {
+            Log.w(TAG, "Ignoring stale activity result for requestCode=$requestCode")
+            return true
+        }
+
         if (requestCode == 990) {
             if (resultCode == Activity.RESULT_OK) {
                 saveFile(
@@ -926,6 +1004,6 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
             return true
         }
-        return false
+        return true
     }
 }
