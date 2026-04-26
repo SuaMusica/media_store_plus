@@ -56,6 +56,11 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private var id3v2Tags: Map<String, String>? = null
         private var shouldAddCover: Boolean = false
         private val TAG = "MediaStorage"
+        private val maxMp3BytesForId3Rewrite = 32L * 1024L * 1024L
+        private val maxExistingId3TagBytes = 2L * 1024L * 1024L
+        private val maxArtworkBytesForId3 = 1024L * 1024L
+        private val id3RewriteHeapOverheadBytes = 16L * 1024L * 1024L
+        private val maxDocumentTreeChildren = 500
 
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
@@ -275,39 +280,129 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         id3v2Tags: Map<String, String>?,
         shouldAddCover: Boolean = false,
     ) {
-        if (id3v2Tags != null) {
-            try {
-                val mp3File = Mp3File(file)
+        if (id3v2Tags == null) {
+            return
+        }
 
-                val id3v24Tag = ID3v24Tag()
-                id3v24Tag.title = id3v2Tags["title"]
-                id3v24Tag.comment = id3v2Tags["comment"]
-                id3v24Tag.album = id3v2Tags["album"]
-                id3v24Tag.artist = id3v2Tags["artist"]
-                id3v24Tag.url = java.lang.String.format(
-                    "https://www.suamusica.com.br/perfil/%s?playlistId=%s&albumId=%s&musicId=%s",
-                    id3v2Tags["artistId"],
-                    id3v2Tags["playlistId"],
-                    id3v2Tags["albumId"],
-                    id3v2Tags["musicId"]
-                )
+        val mp3Source = File(file)
+        val skipReason = reasonToSkipId3Rewrite(mp3Source, id3v2Tags, shouldAddCover)
+        if (skipReason != null) {
+            Log.w(TAG, "Skipping ID3v2 tags for ${mp3Source.name}: $skipReason")
+            return
+        }
 
-                val artworkFile = File(id3v2Tags["artwork"])
-                if (shouldAddCover && artworkFile.exists()) {
-                    id3v24Tag.setAlbumImage(artworkFile.readBytes(), "image/jpeg")
-                }
+        var temporaryTaggedFile: File? = null
+        try {
+            val mp3File = Mp3File(file)
 
-                mp3File.id3v2Tag = id3v24Tag
-                val newFilename = "$file.tmp"
-                mp3File.save(newFilename)
+            val id3v24Tag = ID3v24Tag()
+            id3v24Tag.title = id3v2Tags["title"]
+            id3v24Tag.comment = id3v2Tags["comment"]
+            id3v24Tag.album = id3v2Tags["album"]
+            id3v24Tag.artist = id3v2Tags["artist"]
+            id3v24Tag.url = java.lang.String.format(
+                "https://www.suamusica.com.br/perfil/%s?playlistId=%s&albumId=%s&musicId=%s",
+                id3v2Tags["artistId"],
+                id3v2Tags["playlistId"],
+                id3v2Tags["albumId"],
+                id3v2Tags["musicId"]
+            )
 
-                val from = File(newFilename)
-                from.renameTo(File(file))
-
-                Log.i(TAG, "Successfully set ID3v2 tags")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to set ID3v2 tags", e)
+            val artworkFile = id3v2Tags["artwork"]?.let { File(it) }
+            if (shouldAddCover && artworkFile?.exists() == true) {
+                id3v24Tag.setAlbumImage(artworkFile.readBytes(), "image/jpeg")
             }
+
+            mp3File.id3v2Tag = id3v24Tag
+            val newFilename = "$file.tmp"
+            temporaryTaggedFile = File(newFilename)
+            mp3File.save(newFilename)
+
+            temporaryTaggedFile.renameTo(File(file))
+
+            Log.i(TAG, "Successfully set ID3v2 tags")
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "Skipping ID3v2 tags after OutOfMemoryError", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set ID3v2 tags", e)
+        } finally {
+            temporaryTaggedFile?.takeIf { it.exists() }?.delete()
+        }
+    }
+
+    private fun reasonToSkipId3Rewrite(
+        mp3Source: File,
+        id3v2Tags: Map<String, String>,
+        shouldAddCover: Boolean,
+    ): String? {
+        if (!mp3Source.exists()) {
+            return "source file does not exist"
+        }
+
+        val fileSize = mp3Source.length()
+        if (fileSize > maxMp3BytesForId3Rewrite) {
+            return "source file is too large (${fileSize} bytes)"
+        }
+
+        val existingTagSize = readId3v2TagSize(mp3Source)
+        if (existingTagSize != null && existingTagSize > maxExistingId3TagBytes) {
+            return "existing ID3v2 tag is too large (${existingTagSize} bytes)"
+        }
+
+        val artworkSize = if (shouldAddCover) {
+            val artwork = id3v2Tags["artwork"]?.let { File(it) }
+            if (artwork?.exists() == true) artwork.length() else 0L
+        } else {
+            0L
+        }
+        if (artworkSize > maxArtworkBytesForId3) {
+            return "artwork is too large (${artworkSize} bytes)"
+        }
+
+        val requiredHeap = (fileSize * 2L) + artworkSize + id3RewriteHeapOverheadBytes
+        val availableHeap = availableHeapBytes()
+        if (availableHeap < requiredHeap) {
+            return "not enough heap for ID3 rewrite (available=${availableHeap}, required=${requiredHeap})"
+        }
+
+        return null
+    }
+
+    private fun availableHeapBytes(): Long {
+        val runtime = Runtime.getRuntime()
+        val usedHeap = runtime.totalMemory() - runtime.freeMemory()
+        return runtime.maxMemory() - usedHeap
+    }
+
+    private fun readId3v2TagSize(file: File): Long? {
+        file.inputStream().use { input ->
+            val header = ByteArray(10)
+            if (input.read(header) != header.size) {
+                return null
+            }
+            if (
+                header[0] != 'I'.code.toByte() ||
+                header[1] != 'D'.code.toByte() ||
+                header[2] != '3'.code.toByte()
+            ) {
+                return null
+            }
+            if (
+                (header[6].toInt() and 0x80) != 0 ||
+                (header[7].toInt() and 0x80) != 0 ||
+                (header[8].toInt() and 0x80) != 0 ||
+                (header[9].toInt() and 0x80) != 0
+            ) {
+                return null
+            }
+
+            val tagSize =
+                ((header[6].toLong() and 0x7FL) shl 21) or
+                    ((header[7].toLong() and 0x7FL) shl 14) or
+                    ((header[8].toLong() and 0x7FL) shl 7) or
+                    (header[9].toLong() and 0x7FL)
+
+            return tagSize + header.size
         }
     }
 
@@ -425,23 +520,23 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         val projection: Array<String> = arrayOf(MediaStore.MediaColumns._ID)
         val selectionArgs =
             arrayOf(displayName, relativePath)
-        val cursor: Cursor = activity!!.applicationContext.contentResolver.query(
+        val cursor: Cursor? = activity!!.applicationContext.contentResolver.query(
             uri,
             projection,
             MediaStore.Audio.Media.DISPLAY_NAME + " =?  AND " + MediaStore.Audio.Media.RELATIVE_PATH + " =? ",
             selectionArgs,
             null
-        )!!
-        cursor.moveToFirst()
+        }
         Log.d(TAG, "getUriFromDisplayName: $uri")
-        return if (cursor.count > 0) {
-            val columnIndex: Int = cursor.getColumnIndex(projection[0])
-            val fileId: Long = cursor.getLong(columnIndex)
-            cursor.close()
-            Log.d(TAG, "getUriFromDisplayName2: $uri/$fileId")
-            Uri.parse("$uri/$fileId")
-        } else {
-            null
+        return cursor?.use {
+            if (it.moveToFirst()) {
+                val columnIndex: Int = it.getColumnIndex(projection[0])
+                val fileId: Long = it.getLong(columnIndex)
+                Log.d(TAG, "getUriFromDisplayName2: $uri/$fileId")
+                Uri.parse("$uri/$fileId")
+            } else {
+                null
+            }
         }
 
     }
@@ -606,22 +701,21 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         }
 
         val contentResolver: ContentResolver = activity!!.applicationContext.contentResolver
-        val cursor: Cursor = contentResolver.query(
+        val cursor: Cursor? = contentResolver.query(
             uri,
             arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
             null,
             null,
             null
-        )!!
+        }
 
-        cursor.moveToFirst()
-        return if (cursor.count > 0) {
-            val columnIndex: Int = cursor.getColumnIndex(cursor.columnNames[0])
-            val fileId: Long = cursor.getLong(columnIndex)
-            cursor.close()
-            fileId
-        } else {
-            null
+        return cursor?.use {
+            if (it.moveToFirst()) {
+                val columnIndex: Int = it.getColumnIndex(it.columnNames[0])
+                it.getLong(columnIndex)
+            } else {
+                null
+            }
         }
     }
 
@@ -707,33 +801,37 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     private fun getFolderChildren(uriString: String) {
         try {
             val directoryUri = Uri.parse(uriString)
-            val documentsTree =
-                DocumentFile.fromTreeUri(activity!!.applicationContext, directoryUri)
-            val children: MutableList<DocumentInfo> = mutableListOf()
-            documentsTree?.let {
-                val childDocuments = documentsTree.listFiles()
-                for (childDocument in childDocuments) {
-                    Log.d("File: ", "${childDocument.name}, ${childDocument.uri}")
-                    children.add(
-                        DocumentInfo(
-                            childDocument.name,
-                            childDocument.uri.toString().trim(),
-                            childDocument.isVirtual,
-                            childDocument.isDirectory,
-                            childDocument.type,
-                            childDocument.lastModified(),
-                            childDocument.length(),
-                            isWritable(childDocument.uri.toString()),
-                            isDeletable(childDocument.uri.toString()),
-                        )
-                    )
-                }
-            }
-            val documentTreeInfo = DocumentTreeInfo(directoryUri.toString().trim(), children)
+            val documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = true)
             result.success(documentTreeInfo.json)
         } catch (e: Exception) {
             result.success("")
         }
+    }
+
+    private fun buildDocumentTreeInfo(
+        directoryUri: Uri,
+        includePermissions: Boolean,
+    ): DocumentTreeInfo {
+        val documentsTree = DocumentFile.fromTreeUri(activity!!.applicationContext, directoryUri)
+        val children: MutableList<DocumentInfo> = mutableListOf()
+        documentsTree?.listFiles()?.take(maxDocumentTreeChildren)?.forEach { childDocument ->
+            Log.d("File: ", "${childDocument.name}, ${childDocument.uri}")
+            val childUri = childDocument.uri.toString().trim()
+            children.add(
+                DocumentInfo(
+                    childDocument.name,
+                    childUri,
+                    childDocument.isVirtual,
+                    childDocument.isDirectory,
+                    childDocument.type,
+                    childDocument.lastModified(),
+                    childDocument.length(),
+                    if (includePermissions) isWritable(childUri) else null,
+                    if (includePermissions) isDeletable(childUri) else null,
+                )
+            )
+        }
+        return DocumentTreeInfo(directoryUri.toString().trim(), children)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
@@ -782,31 +880,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                             Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                     contentResolver.takePersistableUriPermission(directoryUri, takeFlags)
 
-                    val documentsTree =
-                        DocumentFile.fromTreeUri(activity!!.applicationContext, directoryUri)
-
-                    val children: MutableList<DocumentInfo> = mutableListOf()
-                    documentsTree?.let {
-                        val childDocuments = documentsTree.listFiles()
-                        for (childDocument in childDocuments) {
-                            Log.d("File: ", "${childDocument.name}, ${childDocument.uri}")
-                            children.add(
-                                DocumentInfo(
-                                    childDocument.name,
-                                    childDocument.uri.toString().trim(),
-                                    childDocument.isVirtual,
-                                    childDocument.isDirectory,
-                                    childDocument.type,
-                                    childDocument.lastModified(),
-                                    childDocument.length(),
-                                    null,
-                                    null,
-                                )
-                            )
-                            uriList.add(childDocument.uri.toString().trim())
-                        }
-                    }
-                    documentTreeInfo = DocumentTreeInfo(directoryUri.toString().trim(), children)
+                    documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = false)
 
                 }
                 val string = documentTreeInfo?.json ?: ""

@@ -10,8 +10,12 @@ data class DocumentTreeInfo(
     @SerializedName("children")
     val children: List<DocumentInfo>
 ) {
+    companion object {
+        private val gson = Gson()
+    }
+
     val json: String
-        get() = Gson().toJson(this);
+        get() = gson.toJson(this)
 }
 
 data class DocumentInfo(
