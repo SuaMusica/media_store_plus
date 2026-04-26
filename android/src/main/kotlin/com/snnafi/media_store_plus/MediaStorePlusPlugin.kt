@@ -669,7 +669,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             MediaStore.Audio.Media.DISPLAY_NAME + " =?  AND " + MediaStore.Audio.Media.RELATIVE_PATH + " =? ",
             selectionArgs,
             null
-        }
+        )
         Log.d(TAG, "getUriFromDisplayName: $uri")
         return cursor?.use {
             if (it.moveToFirst()) {
@@ -848,7 +848,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             null,
             null,
             null
-        }
+        )
 
         return cursor?.use {
             if (it.moveToFirst()) {
