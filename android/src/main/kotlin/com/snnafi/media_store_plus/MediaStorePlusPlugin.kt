@@ -5,11 +5,14 @@ import android.app.RecoverableSecurityException
 import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Intent
+import android.content.IntentSender.SendIntentException
 import android.database.Cursor
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
@@ -29,6 +32,7 @@ import io.flutter.plugin.common.PluginRegistry
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
+import java.util.concurrent.Executors
 
 
 fun String.capitalized(): String {
@@ -45,8 +49,9 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private var activity: Activity? = null
         private var activityBinding: ActivityPluginBinding? = null
         private lateinit var channel: MethodChannel
-        private lateinit var result: OneShotResult
-        private val pendingResults = mutableMapOf<Int, OneShotResult>()
+        private val pendingRequests = mutableMapOf<Int, PendingRequest>()
+        private val mainHandler = Handler(Looper.getMainLooper())
+        private val ioExecutor = Executors.newSingleThreadExecutor()
         private lateinit var uriString: String
         private lateinit var fileName: String
         private lateinit var tempFilePath: String
@@ -62,6 +67,19 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private val maxArtworkBytesForId3 = 1024L * 1024L
         private val id3RewriteHeapOverheadBytes = 16L * 1024L * 1024L
         private val maxDocumentTreeChildren = 500
+
+        private data class PendingRequest(
+            val reply: OneShotResult,
+            val uriString: String? = null,
+            val fileName: String? = null,
+            val tempFilePath: String? = null,
+            val dirType: Int = 0,
+            val dirName: String? = null,
+            val appFolder: String? = null,
+            val externalVolumeName: String? = null,
+            val id3v2Tags: Map<String, String>? = null,
+            val shouldAddCover: Boolean = false,
+        )
 
         private inner class OneShotResult(private val delegate: Result) : Result {
             private var completed = false
@@ -100,20 +118,73 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
         }
 
-        private fun savePendingResult(requestCode: Int) {
-            pendingResults.remove(requestCode)?.success(false)
-            pendingResults[requestCode] = result
+        private fun runOnIo(reply: OneShotResult, failureValue: Any? = false, block: () -> Unit) {
+            ioExecutor.execute {
+                try {
+                    block()
+                } catch (e: Exception) {
+                    Log.e(TAG, "I/O operation failed", e)
+                    reply.success(failureValue)
+                }
+            }
         }
 
-        private fun restorePendingResult(requestCode: Int): Boolean {
-            val pendingResult = pendingResults.remove(requestCode) ?: return false
-            result = pendingResult
-            return true
+        private fun savePendingRequest(requestCode: Int, pendingRequest: PendingRequest) {
+            pendingRequests.remove(requestCode)?.reply?.success(false)
+            pendingRequests[requestCode] = pendingRequest
+        }
+
+        private fun takePendingRequest(requestCode: Int): PendingRequest? {
+            return pendingRequests.remove(requestCode)
         }
 
         private fun finishPendingResults(value: Any?) {
-            pendingResults.values.forEach { it.success(value) }
-            pendingResults.clear()
+            pendingRequests.values.forEach { it.reply.success(value) }
+            pendingRequests.clear()
+        }
+
+        private fun pendingRequestFor(reply: OneShotResult): PendingRequest {
+            return PendingRequest(
+                reply = reply,
+                uriString = if (::uriString.isInitialized) uriString else null,
+                fileName = if (::fileName.isInitialized) fileName else null,
+                tempFilePath = if (::tempFilePath.isInitialized) tempFilePath else null,
+                dirType = dirType,
+                dirName = if (::dirName.isInitialized) dirName else null,
+                appFolder = if (::appFolder.isInitialized) appFolder else null,
+                externalVolumeName = externalVolumeName,
+                id3v2Tags = id3v2Tags,
+                shouldAddCover = shouldAddCover,
+            )
+        }
+
+        private fun launchRecoverableRequest(
+            exception: Exception,
+            requestCode: Int,
+            pendingResult: OneShotResult,
+        ): Boolean {
+            val recoverableSecurityException = exception as? RecoverableSecurityException ?: return false
+            val intentSender = recoverableSecurityException.userAction.actionIntent.intentSender
+            val pendingRequest = pendingRequestFor(pendingResult)
+            mainHandler.post {
+                val currentActivity = activity
+                if (currentActivity == null) {
+                    pendingResult.success(false)
+                    return@post
+                }
+
+                savePendingRequest(requestCode, pendingRequest)
+                try {
+                    currentActivity.startIntentSenderForResult(
+                        intentSender, requestCode, null, 0, 0, 0, null
+                    )
+                } catch (e: SendIntentException) {
+                    pendingRequests.remove(requestCode)
+                    Log.e(TAG, "Could not launch recoverable request $requestCode", e)
+                    pendingResult.success(false)
+                }
+            }
+            return true
         }
 
 
@@ -123,92 +194,117 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
-        this.result = OneShotResult(result)
+        val reply = OneShotResult(result)
         Log.d(TAG, "call.method: ${call.method}")
         if (call.method == "getPlatformSDKInt") {
-            result.success(Build.VERSION.SDK_INT)
+            reply.success(Build.VERSION.SDK_INT)
         } else if (call.method == "saveFile") {
-            saveFile(
-                Uri.parse(call.argument("tempFilePath")!!).path!!,
-                call.argument("fileName")!!,
-                call.argument("appFolder")!!,
-                call.argument("dirType")!!,
-                call.argument("dirName")!!,
-                call.argument("externalVolumeName"),
-                call.argument("id3v2Tags"),
-                call.argument("shouldAddCover")!!,
-            )
-                } else if (call.method == "deleteFile") {
-            deleteFile(
-                call.argument("fileName")!!,
-                call.argument("appFolder")!!,
-                call.argument("dirType")!!,
-                call.argument("dirName")!!
-            )
+            runOnIo(reply) {
+                saveFile(
+                    Uri.parse(call.argument("tempFilePath")!!).path!!,
+                    call.argument("fileName")!!,
+                    call.argument("appFolder")!!,
+                    call.argument("dirType")!!,
+                    call.argument("dirName")!!,
+                    call.argument("externalVolumeName"),
+                    call.argument("id3v2Tags"),
+                    call.argument("shouldAddCover")!!,
+                    reply,
+                )
+            }
+        } else if (call.method == "deleteFile") {
+            runOnIo(reply) {
+                deleteFile(
+                    call.argument("fileName")!!,
+                    call.argument("appFolder")!!,
+                    call.argument("dirType")!!,
+                    call.argument("dirName")!!,
+                    reply,
+                )
+            }
         } else if (call.method == "getFileUri") {
-            val uri: Uri? = getUriFromDisplayName(
-                call.argument("fileName")!!,
-                call.argument("appFolder")!!,
-                call.argument("dirType")!!,
-                call.argument("dirName")!!,
-                call.argument("externalVolumeName"),
-            )
-            if (uri != null) {
-                result.success(uri.toString().trim())
-            } else {
-                result.success(null)
+            runOnIo(reply, failureValue = null) {
+                val uri: Uri? = getUriFromDisplayName(
+                    call.argument("fileName")!!,
+                    call.argument("appFolder")!!,
+                    call.argument("dirType")!!,
+                    call.argument("dirName")!!,
+                    call.argument("externalVolumeName"),
+                )
+                reply.success(uri?.toString()?.trim())
             }
         } else if (call.method == "getUriFromFilePath") {
-            uriFromFilePath(Uri.parse(call.argument("filePath")!!).path!!)
+            uriFromFilePath(Uri.parse(call.argument("filePath")!!).path!!, reply)
         } else if (call.method == "requestForAccess") {
-            requestForAccess(Uri.parse(call.argument("initialRelativePath")!!).path!!)
+            requestForAccess(Uri.parse(call.argument("initialRelativePath")!!).path!!, reply)
         } else if (call.method == "editFile") {
-            editFile(
-                call.argument("contentUri")!!,
-                Uri.parse(call.argument("tempFilePath")!!).path!!,
-            )
+            runOnIo(reply) {
+                editFile(
+                    call.argument("contentUri")!!,
+                    Uri.parse(call.argument("tempFilePath")!!).path!!,
+                    reply,
+                )
+            }
         } else if (call.method == "deleteFileUsingUri") {
-            deleteFileUsingUri(
-                call.argument("contentUri")!!,
-            )
+            runOnIo(reply) {
+                deleteFileUsingUri(
+                    call.argument("contentUri")!!,
+                    reply,
+                )
+            }
         } else if (call.method == "isFileDeletable") {
-            result.success(
-                isDeletable(
-                    call.argument("contentUri")!!,
+            runOnIo(reply) {
+                reply.success(
+                    isDeletable(
+                        call.argument("contentUri")!!,
+                    )
                 )
-            )
+            }
         } else if (call.method == "isFileWritable") {
-            result.success(
-                isWritable(
-                    call.argument("contentUri")!!,
+            runOnIo(reply) {
+                reply.success(
+                    isWritable(
+                        call.argument("contentUri")!!,
+                    )
                 )
-            )
+            }
         } else if (call.method == "readFile") {
-            readFile(
-                Uri.parse(call.argument("tempFilePath")!!).path!!,
-                call.argument("fileName")!!,
-                call.argument("appFolder")!!,
-                call.argument("dirType")!!,
-                call.argument("dirName")!!,
-                call.argument("externalVolumeName")
-            )
-        } else if (call.method == "readFileUsingUri") {
-            readFileUsingUri(
-                call.argument("contentUri")!!,
-                Uri.parse(call.argument("tempFilePath")!!).path!!,
-            )
-        } else if (call.method == "isFileUriExist") {
-            result.success(
-                isFileUriExist(
-                    call.argument("contentUri")!!,
+            runOnIo(reply) {
+                readFile(
+                    Uri.parse(call.argument("tempFilePath")!!).path!!,
+                    call.argument("fileName")!!,
+                    call.argument("appFolder")!!,
+                    call.argument("dirType")!!,
+                    call.argument("dirName")!!,
+                    call.argument("externalVolumeName"),
+                    reply,
                 )
-            )
+            }
+        } else if (call.method == "readFileUsingUri") {
+            runOnIo(reply) {
+                readFileUsingUri(
+                    call.argument("contentUri")!!,
+                    Uri.parse(call.argument("tempFilePath")!!).path!!,
+                    reply,
+                )
+            }
+        } else if (call.method == "isFileUriExist") {
+            runOnIo(reply) {
+                reply.success(
+                    isFileUriExist(
+                        call.argument("contentUri")!!,
+                    )
+                )
+            }
         } else if (call.method == "getDocumentTree") {
-            getFolderChildren(
-                call.argument("contentUri")!!,
-            )
+            runOnIo(reply, failureValue = "") {
+                getFolderChildren(
+                    call.argument("contentUri")!!,
+                    reply,
+                )
+            }
         } else {
-            result.notImplemented()
+            reply.notImplemented()
         }
     }
 
@@ -249,7 +345,8 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         dirName: String,
         externalVolumeName: String?,
         id3v2Tags: Map<String, String>?,
-        shouldAddCover: Boolean = false,
+        shouldAddCover: Boolean,
+        reply: OneShotResult,
     ) {
         this.fileName = name
         this.tempFilePath = path
@@ -257,6 +354,8 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         this.dirType = dirType
         this.dirName = dirName
         this.externalVolumeName = externalVolumeName
+        this.id3v2Tags = id3v2Tags
+        this.shouldAddCover = shouldAddCover
         try {
             createOrUpdateFile(
                 path,
@@ -269,21 +368,11 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 shouldAddCover,
             )
             File(path).delete()
-            result.success(true)
+            reply.success(true)
 
         } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(990)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 990, null, 0, 0, 0, null
-                        )
-                    }
-                }
+            if (!launchRecoverableRequest(e, 990, reply)) {
+                reply.success(false)
             }
             Log.e("Exception", e.message, e)
         }
@@ -293,7 +382,8 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         name: String,
         appFolder: String,
         dirType: Int,
-        dirName: String
+        dirName: String,
+        reply: OneShotResult,
     ) {
         try {
             this.fileName = name
@@ -308,20 +398,10 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 dirName,
                 null
             )
-            result.success(status)
+            reply.success(status)
         } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(991)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 991, null, 0, 0, 0, null
-                        )
-                    }
-                }
+            if (!launchRecoverableRequest(e, 991, reply)) {
+                reply.success(false)
             }
             Log.e("Exception", e.message, e)
         }
@@ -604,8 +684,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     }
 
-    private fun uriFromFilePath(path: String): String? {
-        val reply = result
+    private fun uriFromFilePath(path: String, reply: OneShotResult): String? {
         try {
             MediaScannerConnection.scanFile(
                 activity!!.applicationContext,
@@ -624,7 +703,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     // Music/AppFolder
     @RequiresApi(Build.VERSION_CODES.O)
-    private fun requestForAccess(initialFolderRelativePath: String?) {
+    private fun requestForAccess(initialFolderRelativePath: String?, reply: OneShotResult) {
 
         val startDir: String? = initialFolderRelativePath?.split("/")?.joinToString("%2F")
         startDir?.let {
@@ -653,11 +732,24 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
         }
 
-        savePendingResult(992)
-        activity!!.startActivityForResult(intent, 992)
+        val currentActivity = activity
+        if (currentActivity == null) {
+            reply.success("")
+            return
+        }
+
+        savePendingRequest(992, PendingRequest(reply = reply))
+        try {
+            currentActivity.startActivityForResult(intent, 992)
+        } catch (e: Exception) {
+            pendingRequests.remove(992)
+            Log.e(TAG, "Could not launch directory picker", e)
+            reply.success("")
+        }
     }
 
-    private fun editFile(uriString: String, path: String) {
+    private fun editFile(uriString: String, path: String, reply: OneShotResult) {
+        this.uriString = uriString
         tempFilePath = path
         val fileUri = Uri.parse(uriString)
         try {
@@ -669,43 +761,24 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 }
             }
             File(path).delete()
-            result.success(true)
+            reply.success(true)
         } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(993)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 993, null, 0, 0, 0, null
-                        )
-                    }
-                }
+            if (!launchRecoverableRequest(e, 993, reply)) {
+                reply.success(false)
             }
         }
     }
 
-    private fun deleteFileUsingUri(uriString: String) {
+    private fun deleteFileUsingUri(uriString: String, reply: OneShotResult) {
+        this.uriString = uriString
         val fileUri = Uri.parse(uriString)
         val contentResolver: ContentResolver = activity!!.applicationContext.contentResolver
         try {
             DocumentsContract.deleteDocument(contentResolver, fileUri)
-            result.success(true)
+            reply.success(true)
         } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(994)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 994, null, 0, 0, 0, null
-                        )
-                    }
-                }
+            if (!launchRecoverableRequest(e, 994, reply)) {
+                reply.success(false)
             }
         }
     }
@@ -787,7 +860,8 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         }
     }
 
-    private fun readFileUsingUri(uriString: String, path: String) {
+    private fun readFileUsingUri(uriString: String, path: String, reply: OneShotResult) {
+        this.uriString = uriString
         tempFilePath = path
         val fileUri = Uri.parse(uriString)
         try {
@@ -798,20 +872,10 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     inputStream.copyTo(it)
                 }
             }
-            result.success(true)
+            reply.success(true)
         } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(995)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 995, null, 0, 0, 0, null
-                        )
-                    }
-                }
+            if (!launchRecoverableRequest(e, 995, reply)) {
+                reply.success(false)
             }
         }
     }
@@ -823,12 +887,14 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         dirType: Int,
         dirName: String,
         externalVolumeName: String?,
+        reply: OneShotResult,
     ) {
         this.fileName = name
         this.tempFilePath = path
         this.appFolder = appFolder
         this.dirType = dirType
         this.dirName = dirName
+        this.externalVolumeName = externalVolumeName
 
         Log.d("DirName", dirName)
         try {
@@ -842,23 +908,13 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                         inputStream.copyTo(it)
                     }
                 }
-                result.success(true)
+                reply.success(true)
             } else {
-                result.success(false)
+                reply.success(false)
             }
         } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(996)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 996, null, 0, 0, 0, null
-                        )
-                    }
-                }
+            if (!launchRecoverableRequest(e, 996, reply)) {
+                reply.success(false)
             }
         }
     }
@@ -868,13 +924,13 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         return DocumentsContract.isDocumentUri(activity!!.applicationContext, fileUri)
     }
 
-    private fun getFolderChildren(uriString: String) {
+    private fun getFolderChildren(uriString: String, reply: OneShotResult) {
         try {
             val directoryUri = Uri.parse(uriString)
             val documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = true)
-            result.success(documentTreeInfo.json)
+            reply.success(documentTreeInfo.json)
         } catch (e: Exception) {
-            result.success("")
+            reply.success("")
         }
     }
 
@@ -909,98 +965,117 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         if (requestCode !in 990..996) {
             return false
         }
-        if (!restorePendingResult(requestCode)) {
+        val pendingRequest = takePendingRequest(requestCode)
+        if (pendingRequest == null) {
             Log.w(TAG, "Ignoring stale activity result for requestCode=$requestCode")
             return true
         }
+        val reply = pendingRequest.reply
 
         if (requestCode == 990) {
             if (resultCode == Activity.RESULT_OK) {
-                saveFile(
-                    "",
-                    fileName,
-                    appFolder,
-                    dirType,
-                    dirName,
-                    externalVolumeName,
-                    id3v2Tags,
-                    shouldAddCover,
-                )
+                runOnIo(reply) {
+                    saveFile(
+                        pendingRequest.tempFilePath ?: "",
+                        pendingRequest.fileName ?: "",
+                        pendingRequest.appFolder ?: "",
+                        pendingRequest.dirType,
+                        pendingRequest.dirName ?: "",
+                        pendingRequest.externalVolumeName,
+                        pendingRequest.id3v2Tags,
+                        pendingRequest.shouldAddCover,
+                        reply,
+                    )
+                }
             } else {
-                result.success(false)
+                reply.success(false)
             }
             return true
         } else if (requestCode == 991) {
             if (resultCode == Activity.RESULT_OK) {
-                deleteFile(
-                    fileName,
-                    appFolder,
-                    dirType,
-                    dirName
-                )
+                runOnIo(reply) {
+                    deleteFile(
+                        pendingRequest.fileName ?: "",
+                        pendingRequest.appFolder ?: "",
+                        pendingRequest.dirType,
+                        pendingRequest.dirName ?: "",
+                        reply,
+                    )
+                }
             } else {
-                result.success(false)
+                reply.success(false)
             }
             return true
         } else if (requestCode == 992) {
             // https://developer.android.com/training/data-storage/shared/documents-files#persist-permissions
             if (resultCode == Activity.RESULT_OK) {
-                var documentTreeInfo: DocumentTreeInfo? = null
-                val uriList: MutableList<String> = mutableListOf()
-                data?.data?.also { directoryUri ->
-                    Log.d(TAG, "requestForAccess: G: $directoryUri")
-
-                    uriList.add(directoryUri.toString().trim())
-
-
+                val directoryUri = data?.data
+                if (directoryUri != null) {
                     val contentResolver = activity!!.applicationContext.contentResolver
                     val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                             Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                     contentResolver.takePersistableUriPermission(directoryUri, takeFlags)
-
-                    documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = false)
-
+                    runOnIo(reply, failureValue = "") {
+                        val documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = false)
+                        val string = documentTreeInfo.json
+                        Log.d("requestForAccess: G", string)
+                        reply.success(string)
+                    }
+                } else {
+                    reply.success("")
                 }
-                val string = documentTreeInfo?.json ?: ""
-                Log.d("requestForAccess: G", string)
-                result.success(string)
             } else {
-                result.success("")
+                reply.success("")
             }
             return true
         } else if (requestCode == 993) {
             if (resultCode == Activity.RESULT_OK) {
-                editFile(uriString, tempFilePath)
+                runOnIo(reply) {
+                    editFile(
+                        pendingRequest.uriString ?: "",
+                        pendingRequest.tempFilePath ?: "",
+                        reply,
+                    )
+                }
             } else {
-                result.success(false)
+                reply.success(false)
             }
             return true
         } else if (requestCode == 994) {
             if (resultCode == Activity.RESULT_OK) {
-                deleteFileUsingUri(uriString)
+                runOnIo(reply) { deleteFileUsingUri(pendingRequest.uriString ?: "", reply) }
             } else {
-                result.success(false)
+                reply.success(false)
             }
             return true
         } else if (requestCode == 995) {
             if (resultCode == Activity.RESULT_OK) {
-                readFileUsingUri(uriString, tempFilePath)
+                runOnIo(reply) {
+                    readFileUsingUri(
+                        pendingRequest.uriString ?: "",
+                        pendingRequest.tempFilePath ?: "",
+                        reply,
+                    )
+                }
             } else {
-                result.success(false)
+                reply.success(false)
             }
             return true
         } else if (requestCode == 996) {
             if (resultCode == Activity.RESULT_OK) {
-                readFile(
-                    tempFilePath,
-                    fileName,
-                    appFolder,
-                    dirType,
-                    dirName,
-                    externalVolumeName,
-                )
+                runOnIo(reply) {
+                    readFile(
+                        pendingRequest.tempFilePath ?: "",
+                        pendingRequest.fileName ?: "",
+                        pendingRequest.appFolder ?: "",
+                        pendingRequest.dirType,
+                        pendingRequest.dirName ?: "",
+                        pendingRequest.externalVolumeName,
+                        reply,
+                    )
+                }
             } else {
-                result.success(false)
+                reply.success(false)
             }
             return true
         }
