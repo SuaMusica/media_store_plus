@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:flutter/widgets.dart';
 import 'package:media_store_plus/src/dir_type.dart';
 import 'package:media_store_plus/src/document_tree.dart';
 import 'package:media_store_plus/src/exceptions.dart';
@@ -34,11 +33,12 @@ class MediaStore {
   }
 
   /// Get running platform sdk int
-  Future<int> getPlatformSDKInt() {
+  Future<int> getPlatformSDKInt() async {
     if (_sdkInt != 0) {
       return Future.value(_sdkInt);
     }
-    return MediaStorePlatform.instance.getPlatformSDKInt();
+    _sdkInt = await MediaStorePlatform.instance.getPlatformSDKInt();
+    return _sdkInt;
   }
 
   /// It will create new file or update exsiting file. Return `true` upon saving or updating.
@@ -75,8 +75,10 @@ class MediaStore {
     }
 
     checkDirTypeAndName(dirType: dirType, dirName: dirName);
+    final sdkInt = await getPlatformSDKInt();
+
     //Android 11 or higher, we use MediaStore API
-    if (_sdkInt > android10) {
+    if (sdkInt > android10) {
       String fileName = Uri.parse(tempFilePath).pathSegments.last.trim();
       return await MediaStorePlatform.instance.saveFile(
         tempFilePath: tempFilePath,
@@ -133,7 +135,9 @@ class MediaStore {
 
     checkDirTypeAndName(dirType: dirType, dirName: dirName);
 
-    if (_sdkInt >= 29) {
+    final sdkInt = await getPlatformSDKInt();
+
+    if (sdkInt >= 29) {
       return await MediaStorePlatform.instance.deleteFile(
         fileName: fileName,
         dirType: dirType,
@@ -179,7 +183,9 @@ class MediaStore {
 
     checkDirTypeAndName(dirType: dirType, dirName: dirName);
 
-    if (_sdkInt >= 29) {
+    final sdkInt = await getPlatformSDKInt();
+
+    if (sdkInt >= 29) {
       return await MediaStorePlatform.instance.getFileUri(
         fileName: fileName,
         dirType: dirType,
@@ -223,7 +229,9 @@ class MediaStore {
 
     checkDirTypeAndName(dirType: dirType, dirName: dirName);
 
-    if (_sdkInt >= 29) {
+    final sdkInt = await getPlatformSDKInt();
+
+    if (sdkInt >= 29) {
       final uri = await MediaStorePlatform.instance.getFileUri(
         fileName: fileName,
         dirType: dirType,
@@ -329,7 +337,9 @@ class MediaStore {
 
     checkDirTypeAndName(dirType: dirType, dirName: dirName);
 
-    if (_sdkInt >= 29) {
+    final sdkInt = await getPlatformSDKInt();
+
+    if (sdkInt >= 29) {
       return await MediaStorePlatform.instance.readFile(
         tempFilePath: tempFilePath,
         fileName: fileName,
