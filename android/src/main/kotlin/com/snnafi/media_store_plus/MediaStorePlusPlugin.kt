@@ -10,6 +10,8 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
@@ -29,6 +31,8 @@ import io.flutter.plugin.common.PluginRegistry
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 
 fun String.capitalized(): String {
@@ -57,6 +61,8 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         private var id3v2Tags: Map<String, String>? = null
         private var shouldAddCover: Boolean = false
         private val TAG = "MediaStorage"
+        private val mainHandler = Handler(Looper.getMainLooper())
+        private var ioExecutor: ExecutorService = newIoExecutor()
         private val maxMp3BytesForId3Rewrite = 32L * 1024L * 1024L
         private val maxExistingId3TagBytes = 2L * 1024L * 1024L
         private val maxArtworkBytesForId3 = 1024L * 1024L
@@ -70,10 +76,12 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             override fun success(result: Any?) {
                 if (completed) return
                 completed = true
-                try {
-                    delegate.success(result)
-                } catch (e: IllegalStateException) {
-                    Log.w(TAG, "Ignoring duplicate MediaStorePlus result", e)
+                runOnMainThread {
+                    try {
+                        delegate.success(result)
+                    } catch (e: IllegalStateException) {
+                        Log.w(TAG, "Ignoring duplicate MediaStorePlus result", e)
+                    }
                 }
             }
 
@@ -81,10 +89,12 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
                 if (completed) return
                 completed = true
-                try {
-                    delegate.error(errorCode, errorMessage, errorDetails)
-                } catch (e: IllegalStateException) {
-                    Log.w(TAG, "Ignoring duplicate MediaStorePlus error result", e)
+                runOnMainThread {
+                    try {
+                        delegate.error(errorCode, errorMessage, errorDetails)
+                    } catch (e: IllegalStateException) {
+                        Log.w(TAG, "Ignoring duplicate MediaStorePlus error result", e)
+                    }
                 }
             }
 
@@ -92,17 +102,65 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             override fun notImplemented() {
                 if (completed) return
                 completed = true
-                try {
-                    delegate.notImplemented()
-                } catch (e: IllegalStateException) {
-                    Log.w(TAG, "Ignoring duplicate MediaStorePlus notImplemented result", e)
+                runOnMainThread {
+                    try {
+                        delegate.notImplemented()
+                    } catch (e: IllegalStateException) {
+                        Log.w(TAG, "Ignoring duplicate MediaStorePlus notImplemented result", e)
+                    }
                 }
             }
         }
 
-        private fun savePendingResult(requestCode: Int) {
+        private fun runOnMainThread(block: () -> Unit) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                block()
+            } else {
+                mainHandler.post { block() }
+            }
+        }
+
+        private fun newIoExecutor(): ExecutorService {
+            return Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "media-store-plus-io").apply { isDaemon = true }
+            }
+        }
+
+        private fun runOnIoThread(reply: OneShotResult = result, block: (OneShotResult) -> Unit) {
+            ioExecutor.execute {
+                block(reply)
+            }
+        }
+
+        private fun requestWriteAccess(
+            requestCode: Int,
+            exception: RecoverableSecurityException,
+            reply: OneShotResult,
+        ) {
+            runOnMainThread {
+                val currentActivity = activity
+                if (currentActivity == null) {
+                    Log.e("Exception", "Cannot request MediaStore write access without an activity", exception)
+                    reply.success(false)
+                    return@runOnMainThread
+                }
+
+                savePendingResult(requestCode, reply)
+                currentActivity.startIntentSenderForResult(
+                    exception.userAction.actionIntent.intentSender,
+                    requestCode,
+                    null,
+                    0,
+                    0,
+                    0,
+                    null
+                )
+            }
+        }
+
+        private fun savePendingResult(requestCode: Int, reply: OneShotResult = result) {
             pendingResults.remove(requestCode)?.success(false)
-            pendingResults[requestCode] = result
+            pendingResults[requestCode] = reply
         }
 
         private fun restorePendingResult(requestCode: Int): Boolean {
@@ -118,6 +176,9 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
+        if (ioExecutor.isShutdown) {
+            ioExecutor = newIoExecutor()
+        }
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "media_store_plus")
         channel.setMethodCallHandler(this)
     }
@@ -146,17 +207,25 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 call.argument("dirName")!!
             )
         } else if (call.method == "getFileUri") {
-            val uri: Uri? = getUriFromDisplayName(
-                call.argument("fileName")!!,
-                call.argument("appFolder")!!,
-                call.argument("dirType")!!,
-                call.argument("dirName")!!,
-                call.argument("externalVolumeName"),
-            )
-            if (uri != null) {
-                result.success(uri.toString().trim())
-            } else {
-                result.success(null)
+            val fileName = call.argument<String>("fileName")!!
+            val appFolder = call.argument<String>("appFolder")!!
+            val dirType = call.argument<Int>("dirType")!!
+            val dirName = call.argument<String>("dirName")!!
+            val externalVolumeName = call.argument<String>("externalVolumeName")
+            runOnIoThread(this.result) { reply ->
+                try {
+                    val uri: Uri? = getUriFromDisplayName(
+                        fileName,
+                        appFolder,
+                        dirType,
+                        dirName,
+                        externalVolumeName,
+                    )
+                    reply.success(uri?.toString()?.trim())
+                } catch (e: Exception) {
+                    Log.e("Exception", e.message, e)
+                    reply.success(null)
+                }
             }
         } else if (call.method == "getUriFromFilePath") {
             uriFromFilePath(Uri.parse(call.argument("filePath")!!).path!!)
@@ -172,17 +241,25 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 call.argument("contentUri")!!,
             )
         } else if (call.method == "isFileDeletable") {
-            result.success(
-                isDeletable(
-                    call.argument("contentUri")!!,
-                )
-            )
+            val contentUri = call.argument<String>("contentUri")!!
+            runOnIoThread(this.result) { reply ->
+                try {
+                    reply.success(isDeletable(contentUri))
+                } catch (e: Exception) {
+                    Log.e("Exception", e.message, e)
+                    reply.success(false)
+                }
+            }
         } else if (call.method == "isFileWritable") {
-            result.success(
-                isWritable(
-                    call.argument("contentUri")!!,
-                )
-            )
+            val contentUri = call.argument<String>("contentUri")!!
+            runOnIoThread(this.result) { reply ->
+                try {
+                    reply.success(isWritable(contentUri))
+                } catch (e: Exception) {
+                    Log.e("Exception", e.message, e)
+                    reply.success(false)
+                }
+            }
         } else if (call.method == "readFile") {
             readFile(
                 Uri.parse(call.argument("tempFilePath")!!).path!!,
@@ -198,11 +275,15 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 Uri.parse(call.argument("tempFilePath")!!).path!!,
             )
         } else if (call.method == "isFileUriExist") {
-            result.success(
-                isFileUriExist(
-                    call.argument("contentUri")!!,
-                )
-            )
+            val contentUri = call.argument<String>("contentUri")!!
+            runOnIoThread(this.result) { reply ->
+                try {
+                    reply.success(isFileUriExist(contentUri))
+                } catch (e: Exception) {
+                    Log.e("Exception", e.message, e)
+                    reply.success(false)
+                }
+            }
         } else if (call.method == "getDocumentTree") {
             getFolderChildren(
                 call.argument("contentUri")!!,
@@ -221,6 +302,7 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
 
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
         finishPendingResults(false)
+        ioExecutor.shutdown()
         channel.setMethodCallHandler(null)
     }
 
@@ -251,41 +333,35 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         id3v2Tags: Map<String, String>?,
         shouldAddCover: Boolean = false,
     ) {
-        this.fileName = name
-        this.tempFilePath = path
-        this.appFolder = appFolder
-        this.dirType = dirType
-        this.dirName = dirName
-        this.externalVolumeName = externalVolumeName
-        try {
-            createOrUpdateFile(
-                path,
-                name,
-                appFolder,
-                dirType,
-                dirName,
-                externalVolumeName,
-                id3v2Tags,
-                shouldAddCover,
-            )
-            File(path).delete()
-            result.success(true)
-
-        } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(990)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 990, null, 0, 0, 0, null
-                        )
-                    }
+        val reply = result
+        runOnIoThread(reply) { currentReply ->
+            this.fileName = name
+            this.tempFilePath = path
+            this.appFolder = appFolder
+            this.dirType = dirType
+            this.dirName = dirName
+            this.externalVolumeName = externalVolumeName
+            try {
+                createOrUpdateFile(
+                    path,
+                    name,
+                    appFolder,
+                    dirType,
+                    dirName,
+                    externalVolumeName,
+                    id3v2Tags,
+                    shouldAddCover,
+                )
+                File(path).delete()
+                currentReply.success(true)
+            } catch (e: Exception) {
+                if (e is RecoverableSecurityException) {
+                    requestWriteAccess(990, e, currentReply)
+                } else {
+                    Log.e("Exception", e.message, e)
+                    currentReply.success(false)
                 }
             }
-            Log.e("Exception", e.message, e)
         }
     }
 
@@ -295,35 +371,30 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         dirType: Int,
         dirName: String
     ) {
-        try {
+        val reply = result
+        runOnIoThread(reply) { currentReply ->
             this.fileName = name
             this.tempFilePath = ""
             this.appFolder = appFolder
             this.dirType = dirType
             this.dirName = dirName
-            val status: Boolean = deleteFileUsingDisplayName(
-                name,
-                appFolder,
-                dirType,
-                dirName,
-                null
-            )
-            result.success(status)
-        } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(991)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 991, null, 0, 0, 0, null
-                        )
-                    }
+            try {
+                val status: Boolean = deleteFileUsingDisplayName(
+                    name,
+                    appFolder,
+                    dirType,
+                    dirName,
+                    null
+                )
+                currentReply.success(status)
+            } catch (e: Exception) {
+                if (e is RecoverableSecurityException) {
+                    requestWriteAccess(991, e, currentReply)
+                } else {
+                    Log.e("Exception", e.message, e)
+                    currentReply.success(false)
                 }
             }
-            Log.e("Exception", e.message, e)
         }
     }
 
@@ -658,53 +729,47 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     private fun editFile(uriString: String, path: String) {
-        tempFilePath = path
-        val fileUri = Uri.parse(uriString)
-        try {
-            val contentResolver: ContentResolver =
-                activity!!.applicationContext.contentResolver
-            contentResolver.openFileDescriptor(fileUri, "w")?.use {
-                FileOutputStream(it.fileDescriptor).use { os ->
-                    File(path).inputStream().use { it.copyTo(os) }
-                }
-            }
-            File(path).delete()
-            result.success(true)
-        } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(993)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 993, null, 0, 0, 0, null
-                        )
+        val reply = result
+        runOnIoThread(reply) { currentReply ->
+            this.uriString = uriString
+            tempFilePath = path
+            val fileUri = Uri.parse(uriString)
+            try {
+                val contentResolver: ContentResolver =
+                    activity!!.applicationContext.contentResolver
+                contentResolver.openFileDescriptor(fileUri, "w")?.use {
+                    FileOutputStream(it.fileDescriptor).use { os ->
+                        File(path).inputStream().use { it.copyTo(os) }
                     }
+                }
+                File(path).delete()
+                currentReply.success(true)
+            } catch (e: Exception) {
+                if (e is RecoverableSecurityException) {
+                    requestWriteAccess(993, e, currentReply)
+                } else {
+                    Log.e("Exception", e.message, e)
+                    currentReply.success(false)
                 }
             }
         }
     }
 
     private fun deleteFileUsingUri(uriString: String) {
-        val fileUri = Uri.parse(uriString)
-        val contentResolver: ContentResolver = activity!!.applicationContext.contentResolver
-        try {
-            DocumentsContract.deleteDocument(contentResolver, fileUri)
-            result.success(true)
-        } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(994)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 994, null, 0, 0, 0, null
-                        )
-                    }
+        val reply = result
+        runOnIoThread(reply) { currentReply ->
+            this.uriString = uriString
+            val fileUri = Uri.parse(uriString)
+            val contentResolver: ContentResolver = activity!!.applicationContext.contentResolver
+            try {
+                DocumentsContract.deleteDocument(contentResolver, fileUri)
+                currentReply.success(true)
+            } catch (e: Exception) {
+                if (e is RecoverableSecurityException) {
+                    requestWriteAccess(994, e, currentReply)
+                } else {
+                    Log.e("Exception", e.message, e)
+                    currentReply.success(false)
                 }
             }
         }
@@ -788,29 +853,26 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     private fun readFileUsingUri(uriString: String, path: String) {
-        tempFilePath = path
-        val fileUri = Uri.parse(uriString)
-        try {
-            val contentResolver: ContentResolver =
-                activity!!.applicationContext.contentResolver
-            contentResolver.openInputStream(fileUri)?.use { inputStream ->
-                File(path).outputStream().use {
-                    inputStream.copyTo(it)
-                }
-            }
-            result.success(true)
-        } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(995)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 995, null, 0, 0, 0, null
-                        )
+        val reply = result
+        runOnIoThread(reply) { currentReply ->
+            this.uriString = uriString
+            tempFilePath = path
+            val fileUri = Uri.parse(uriString)
+            try {
+                val contentResolver: ContentResolver =
+                    activity!!.applicationContext.contentResolver
+                contentResolver.openInputStream(fileUri)?.use { inputStream ->
+                    File(path).outputStream().use {
+                        inputStream.copyTo(it)
                     }
+                }
+                currentReply.success(true)
+            } catch (e: Exception) {
+                if (e is RecoverableSecurityException) {
+                    requestWriteAccess(995, e, currentReply)
+                } else {
+                    Log.e("Exception", e.message, e)
+                    currentReply.success(false)
                 }
             }
         }
@@ -824,40 +886,36 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         dirName: String,
         externalVolumeName: String?,
     ) {
-        this.fileName = name
-        this.tempFilePath = path
-        this.appFolder = appFolder
-        this.dirType = dirType
-        this.dirName = dirName
+        val reply = result
+        runOnIoThread(reply) { currentReply ->
+            this.fileName = name
+            this.tempFilePath = path
+            this.appFolder = appFolder
+            this.dirType = dirType
+            this.dirName = dirName
 
-        Log.d("DirName", dirName)
-        try {
-            val uri: Uri? =
-                getUriFromDisplayName(name, appFolder, dirType, dirName, externalVolumeName)
-            if (uri != null) {
-                val contentResolver: ContentResolver =
-                    activity!!.applicationContext.contentResolver
-                contentResolver.openInputStream(uri)?.use { inputStream ->
-                    File(path).outputStream().use {
-                        inputStream.copyTo(it)
+            Log.d("DirName", dirName)
+            try {
+                val uri: Uri? =
+                    getUriFromDisplayName(name, appFolder, dirType, dirName, externalVolumeName)
+                if (uri != null) {
+                    val contentResolver: ContentResolver =
+                        activity!!.applicationContext.contentResolver
+                    contentResolver.openInputStream(uri)?.use { inputStream ->
+                        File(path).outputStream().use {
+                            inputStream.copyTo(it)
+                        }
                     }
+                    currentReply.success(true)
+                } else {
+                    currentReply.success(false)
                 }
-                result.success(true)
-            } else {
-                result.success(false)
-            }
-        } catch (e: Exception) {
-            if (e is RecoverableSecurityException) {
-                val recoverableSecurityException = e as? RecoverableSecurityException
-                recoverableSecurityException?.let {
-                    val intentSender =
-                        recoverableSecurityException.userAction.actionIntent.intentSender
-                    intentSender.let {
-                        savePendingResult(996)
-                        activity!!.startIntentSenderForResult(
-                            intentSender, 996, null, 0, 0, 0, null
-                        )
-                    }
+            } catch (e: Exception) {
+                if (e is RecoverableSecurityException) {
+                    requestWriteAccess(996, e, currentReply)
+                } else {
+                    Log.e("Exception", e.message, e)
+                    currentReply.success(false)
                 }
             }
         }
@@ -869,12 +927,16 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     private fun getFolderChildren(uriString: String) {
-        try {
-            val directoryUri = Uri.parse(uriString)
-            val documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = true)
-            result.success(documentTreeInfo.json)
-        } catch (e: Exception) {
-            result.success("")
+        val reply = result
+        runOnIoThread(reply) { currentReply ->
+            try {
+                val directoryUri = Uri.parse(uriString)
+                val documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = true)
+                currentReply.success(documentTreeInfo.json)
+            } catch (e: Exception) {
+                Log.e("Exception", e.message, e)
+                currentReply.success("")
+            }
         }
     }
 
@@ -945,25 +1007,23 @@ class MediaStorePlusPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         } else if (requestCode == 992) {
             // https://developer.android.com/training/data-storage/shared/documents-files#persist-permissions
             if (resultCode == Activity.RESULT_OK) {
-                var documentTreeInfo: DocumentTreeInfo? = null
-                val uriList: MutableList<String> = mutableListOf()
                 data?.data?.also { directoryUri ->
                     Log.d(TAG, "requestForAccess: G: $directoryUri")
-
-                    uriList.add(directoryUri.toString().trim())
-
 
                     val contentResolver = activity!!.applicationContext.contentResolver
                     val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                             Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                     contentResolver.takePersistableUriPermission(directoryUri, takeFlags)
 
-                    documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = false)
-
+                    val reply = result
+                    runOnIoThread(reply) { currentReply ->
+                        val documentTreeInfo = buildDocumentTreeInfo(directoryUri, includePermissions = false)
+                        Log.d("requestForAccess: G", documentTreeInfo.json)
+                        currentReply.success(documentTreeInfo.json)
+                    }
+                    return true
                 }
-                val string = documentTreeInfo?.json ?: ""
-                Log.d("requestForAccess: G", string)
-                result.success(string)
+                result.success("")
             } else {
                 result.success("")
             }
