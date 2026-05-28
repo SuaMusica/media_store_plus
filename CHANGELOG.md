@@ -28,3 +28,8 @@ Fix bug in native side due to gson in release mode.
 ## 0.0.7
 
 Replace `FlutterActivity` with `Activity` to support all subclasses of `Activity`, thus resolving the casting errors.
+
+## 0.0.8
+
+- Updates minimum supported SDK version to Flutter 3.44/Dart 3.12.
+- Migrates to built-in Kotlin.
