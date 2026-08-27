@@ -1,28 +1,18 @@
 group 'com.snnafi.media_store_plus'
 version '1.0-SNAPSHOT'
 
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-
-    dependencies {
-        classpath 'com.android.tools.build:gradle:7.1.2'
-    }
-}
-
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-
 apply plugin: 'com.android.library'
 
+def usesBuiltInKotlin = providers.gradleProperty("android.builtInKotlin")
+    .map { it.toBoolean() }
+    .getOrElse(false)
+if (!usesBuiltInKotlin) {
+    apply plugin: "org.jetbrains.kotlin.android"
+}
+
 android {
-    compileSdkVersion 33
+    namespace 'com.snnafi.media_store_plus'
+    compileSdk = flutter.compileSdkVersion
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
